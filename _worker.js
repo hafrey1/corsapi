@@ -7,11 +7,18 @@ export default {
   }
 }
 
+// ---------------- 常量 ----------------
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+  'Access-Control-Max-Age': '86400',
 }
+
+const EXCLUDE_HEADERS = new Set([
+  'content-encoding','content-length','transfer-encoding',
+  'connection','keep-alive','set-cookie','set-cookie2'
+])
 
 const JSON_SOURCES = {
   'jin18': 'https://raw.githubusercontent.com/hafrey1/LunaTV-config/refs/heads/main/jin18.json',
@@ -19,78 +26,175 @@ const JSON_SOURCES = {
   'full': 'https://raw.githubusercontent.com/hafrey1/LunaTV-config/refs/heads/main/LunaTV-config.json'
 }
 
-// 🚀 核心优化函数（重点！！！）
+const FORMAT_CONFIG = {
+  '0': { proxy: false, base58: false },
+  'raw': { proxy: false, base58: false },
+  '1': { proxy: true, base58: false },
+  'proxy': { proxy: true, base58: false },
+  '2': { proxy: false, base58: true },
+  'base58': { proxy: false, base58: true },
+  '3': { proxy: true, base58: true },
+  'proxy-base58': { proxy: true, base58: true }
+}
+
+// ---------------- 🚀 核心缓存（KV + Cache）----------------
 async function getCachedJSON(url, ctx) {
   const cache = caches.default
   const cacheKey = new Request(url)
 
-  // ✅ 1. 先查 Cloudflare Cache（完全免费）
-  let response = await cache.match(cacheKey)
-  if (response) {
-    return await response.json()
-  }
+  // 1️⃣ Cache（主力）
+  let res = await cache.match(cacheKey)
+  if (res) return await res.json()
 
-  // ✅ 2. 再查 KV（减少使用）
+  // 2️⃣ KV（备用）
   if (typeof KV !== 'undefined') {
-    const kvData = await KV.get('CACHE_' + url)
-    if (kvData) {
-      const data = JSON.parse(kvData)
+    const kv = await KV.get('CACHE_' + url)
+    if (kv) {
+      const data = JSON.parse(kv)
 
-      const res = new Response(JSON.stringify(data), {
+      const response = new Response(JSON.stringify(data), {
         headers: { 'Content-Type': 'application/json' }
       })
 
-      ctx.waitUntil(cache.put(cacheKey, res.clone()))
+      ctx.waitUntil(cache.put(cacheKey, response.clone()))
       return data
     }
   }
 
-  // ✅ 3. 最后才 fetch（最低频）
-  const res = await fetch(url)
-  const data = await res.json()
+  // 3️⃣ fetch（最少）
+  const response = await fetch(url)
+  if (!response.ok) throw new Error(`Fetch failed ${response.status}`)
+  const data = await response.json()
 
-  // 写 KV（低频）
   if (typeof KV !== 'undefined') {
-    ctx.waitUntil(
-      KV.put('CACHE_' + url, JSON.stringify(data), {
-        expirationTtl: 1800
-      })
-    )
+    ctx.waitUntil(KV.put('CACHE_' + url, JSON.stringify(data), {
+      expirationTtl: 1800
+    }))
   }
 
-  // 写缓存（高频）
-  const newResponse = new Response(JSON.stringify(data), {
+  const newRes = new Response(JSON.stringify(data), {
     headers: {
       'Content-Type': 'application/json',
       'Cache-Control': 'max-age=600'
     }
   })
 
-  ctx.waitUntil(cache.put(cacheKey, newResponse.clone()))
-
-  return dataku
+  ctx.waitUntil(cache.put(cacheKey, newRes.clone()))
+  return data
 }
 
-// 主逻辑
+// ---------------- Base58 ----------------
+const BASE58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
+function base58Encode(obj) {
+  const bytes = new TextEncoder().encode(JSON.stringify(obj))
+  let num = 0n
+  for (let b of bytes) num = (num << 8n) + BigInt(b)
+
+  let str = ''
+  while (num > 0) {
+    str = BASE58[num % 58n] + str
+    num /= 58n
+  }
+  return str
+}
+
+// ---------------- JSON 前缀处理 ----------------
+function addOrReplacePrefix(obj, prefix) {
+  if (typeof obj !== 'object' || obj === null) return obj
+  if (Array.isArray(obj)) return obj.map(i => addOrReplacePrefix(i, prefix))
+
+  const newObj = {}
+  for (const key in obj) {
+    if (key === 'api' && typeof obj[key] === 'string') {
+      let api = obj[key]
+      const idx = api.indexOf('?url=')
+      if (idx !== -1) api = api.slice(idx + 5)
+      if (!api.startsWith(prefix)) api = prefix + api
+      newObj[key] = api
+    } else {
+      newObj[key] = addOrReplacePrefix(obj[key], prefix)
+    }
+  }
+  return newObj
+}
+
+// ---------------- 主入口 ----------------
 async function handleRequest(request, ctx) {
   if (request.method === 'OPTIONS') {
     return new Response(null, { status: 204, headers: CORS_HEADERS })
   }
 
-  const url = new URL(request.url)
-  const format = url.searchParams.get('format')
-  const source = url.searchParams.get('source') || 'full'
+  const reqUrl = new URL(request.url)
+  const pathname = reqUrl.pathname
+  const target = reqUrl.searchParams.get('url')
+  const format = reqUrl.searchParams.get('format')
+  const prefix = reqUrl.searchParams.get('prefix')
+  const source = reqUrl.searchParams.get('source')
 
-  if (format !== null) {
-    const data = await getCachedJSON(JSON_SOURCES[source], ctx)
+  const origin = reqUrl.origin
+  const defaultPrefix = origin + '/?url='
 
-    return new Response(JSON.stringify(data), {
-      headers: {
-        'Content-Type': 'application/json',
-        ...CORS_HEADERS
+  if (pathname === '/health') {
+    return new Response('OK')
+  }
+
+  // ---------------- 代理 ----------------
+  if (target) {
+    if (target.startsWith(origin)) {
+      return new Response('Loop blocked', { status: 400 })
+    }
+
+    if (!/^https?:\/\//i.test(target)) {
+      return new Response('Bad URL', { status: 400 })
+    }
+
+    try {
+      const res = await fetch(target, {
+        method: request.method,
+        headers: request.headers
+      })
+
+      const headers = new Headers(CORS_HEADERS)
+      for (let [k, v] of res.headers) {
+        if (!EXCLUDE_HEADERS.has(k.toLowerCase())) {
+          headers.set(k, v)
+        }
       }
+
+      return new Response(res.body, {
+        status: res.status,
+        headers
+      })
+    } catch {
+      return new Response('Proxy Error', { status: 502 })
+    }
+  }
+
+  // ---------------- JSON ----------------
+  if (format !== null) {
+    const config = FORMAT_CONFIG[format]
+    if (!config) return new Response('Bad format', { status: 400 })
+
+    const selected = JSON_SOURCES[source] || JSON_SOURCES.full
+    const data = await getCachedJSON(selected, ctx)
+
+    const newData = config.proxy
+      ? addOrReplacePrefix(data, prefix || defaultPrefix)
+      : data
+
+    if (config.base58) {
+      return new Response(base58Encode(newData), {
+        headers: { 'Content-Type': 'text/plain', ...CORS_HEADERS }
+      })
+    }
+
+    return new Response(JSON.stringify(newData), {
+      headers: { 'Content-Type': 'application/json', ...CORS_HEADERS }
     })
   }
 
-  return new Response('OK')
+  // ---------------- 首页 ----------------
+  return new Response(`API Proxy OK`, {
+    headers: { 'Content-Type': 'text/plain' }
+  })
 }
