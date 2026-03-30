@@ -1,264 +1,383 @@
-# API 代理 & JSON 订阅器
+# API 中转代理服务
 
-这是一个基于 **Cloudflare Workers** 的中转代理 + JSON 配置前缀替换工具。
+一个基于 Cloudflare Workers / Pages Functions 的通用 API 中转代理服务。
 
-支持将 API 请求通过 Worker 转发，并自动为 JSON 配置中的 `api` 字段添加/替换前缀。
+支持：
 
-同时支持生成 **Base58 编码的订阅格式**，并提供**多种配置源选择**，方便在外部应用中快速使用。
-
----
-
-## ✨ 功能特性
-
-### 1. 通用 API 代理
-
-使用 `?url=` 参数转发任意 API 请求
-
-**示例：**
-
-```
-https://<你的域名>/?url=https://ikunzyapi.com/api.php/provide/vod/
-```
-
-### 2. 多配置源支持
-
-使用 `?source=` 参数选择不同的资源配置：
-
-- **`source=jin18`** - 精简版（31个资源，仅普通内容）
-- **`source=jingjian`** - 精简+成人版（61个资源）
-- **`source=full`** - 完整版（88个资源，**默认**）
-
-### 3. 统一的 format 参数
-
-使用 `?format=` 参数控制输出格式（合并了原来的 config 和 encode 参数）：
-
-- **`format=0`** 或 **`format=raw`** - 原始 JSON
-- **`format=1`** 或 **`format=proxy`** - 添加代理前缀的 JSON
-- **`format=2`** 或 **`format=base58`** - 原始 JSON 的 Base58 编码
-- **`format=3`** 或 **`format=proxy-base58`** - 代理前缀 JSON 的 Base58 编码
-
-**示例：**
-
-```jsx
-// 获取带代理前缀的 JSON
-https://<你的域名>/?format=1&source=jin18
-
-// 获取代理 Base58 编码订阅
-https://<你的域名>/?format=3&source=full
-```
-
-### 5. 动态示例生成
-
-HTML 页面会根据当前域名自动生成示例链接，无需手动修改
+* 任意 API 请求中转
+* JSON 配置订阅输出
+* Base58 编码输出
+* Cloudflare KV + 内存双层缓存
+* 自动 CORS
+* 自定义代理前缀
+* 多配置源切换
+* Workers 与 Pages Functions 通用
 
 ---
 
-## 🚀 部署方法
+# 功能特性
 
-1. 登录 [Cloudflare Dashboard](https://dash.cloudflare.com)
-2. 新建一个 **Workers & Pages → Worker**
-3. 将 `worker.js` 代码粘贴到编辑器中
-4. 保存并部署
-5. 在 Cloudflare Workers KV 中创建命名空间：名称：CONFIG_KV,绑定变量名：CONFIG_KV
-6. 绑定自定义域名（可选）
+* 支持 GET、POST、PUT、DELETE、OPTIONS 等 HTTP 方法
+* 自动透传请求头与请求体
+* 自动过滤敏感响应头
+* 防止自身递归调用
+* 请求超时保护（9 秒）
+* Worker 内存缓存
+* Cloudflare KV 持久缓存
+* 支持 JSON / Base58 两种输出格式
+* 支持代理前缀自动替换
+* 支持自定义配置源
 
 ---
 
-## 🔗 使用示例
+# 项目结构
 
-假设你的 Worker 部署在：[`https://api.example.workers.dev`](https://api.example.workers.dev)
-
-### 示例 1：代理任意 API
-
-```
-https://api.example.workers.dev/?url=https://ikunzyapi.com/api.php/provide/vod/
-```
-
-### 示例 2：获取原始 JSON 配置（精简版）
-
-```jsx
-https://api.example.workers.dev/?format=0&source=jin18
-```
-
-### 示例 3：获取带代理前缀的 JSON 配置（完整版）
-
-```jsx
-https://api.example.workers.dev/?format=1&source=full
-```
-
-### 示例 4：获取原始 Base58 编码（精简+成人版）
-
-```jsx
-https://api.example.workers.dev/?format=2&source=jingjian
-```
-
-### 示例 5：获取代理 Base58 编码订阅（完整版）
-
-```jsx
-https://api.example.workers.dev/?format=3&source=full
-```
-
-### 示例 6：自定义代理前缀
-
-```jsx
-https://api.example.workers.dev/?format=1&source=full&prefix=https://my-proxy.com/?url=
+```tree
+.
+├── worker.js
+├── wrangler.toml
+├── package.json
+└── README.md
 ```
 
 ---
 
-## 🛠️ 参数说明
+# 部署方式
 
-| 参数     | 说明             | 可选值                          | 示例         |        
-| -------- | ---------------- | ------------------------------- | ------------ |
-| `url`    | 代理任意 API 请求 | 任意有效 URL                     | `?url=https://...` |
-| `format` | 配置模式         | `0 或 raw = 原始 JSON`  `1 或 proxy = 添加代理前缀`  `2 或 base58 = 原始 Base58`  `3 或 proxy-base58 = 代理 Base58` | `?format=0` |
-| `source` | 配置源选择       | `jin18` = 精简版`jingjian` = 精简+成人`full` = 完整版） | `?source=jin18` |
-| `prefix` | 自定义代理前缀   | 任意代理地址                      | `?prefix=https://.../?url=` |
-| `errors&limit=10` | 查看错误日志 | `errors&limit=10`                 | `https://<你的域名>?errors&limit=10` |
+## 方案一：Cloudflare Workers
 
----
+### 1. 创建项目
 
-## 📦 配置源对比
-
-| 配置源 | 资源数量 | 包含成人内容 | 适用场景 |
-| --- | --- | --- | --- |
-| **jin18** | 31个 | ❌ 否 | 家庭使用、轻量级应用 |
-| **jingjian** | 61个 | ✅ 是 | 个人使用、中等需求 |
-| **full** | 88个 | ✅ 是 | 完整功能、最大兼容性 |
-
----
-
-## 📋 完整订阅链接模板
-
-将 `\<你的域名\>` 替换为你的实际 Worker 地址：
-
-### 精简版（jin18）
-
-```jsx
-# 原始 JSON
-https://<你的域名>/?format=0&source=jin18
-
-# 带代理前缀的 JSON
-https://<你的域名>/?format=1&source=jin18
-
-# 原始 Base58 编码
-https://<你的域名>/?format=2&source=jin18
-
-# 代理 Base58 编码（推荐用于订阅）
-https://<你的域名>/?format=3&source=jin18
+```bash
+mkdir cf-proxy-service
+cd cf-proxy-service
+npm init -y
 ```
 
-### 精简+成人版（jingjian）
+### 2. 安装 Wrangler
 
-```jsx
-# 原始 JSON
-https://<你的域名>/?format=0&source=jingjian
-
-# 带代理前缀的 JSON
-https://<你的域名>/?format=1&source=jingjian
-
-# 原始 Base58 编码
-https://<你的域名>/?format=2&source=jingjian
-
-# 代理 Base58 编码（推荐用于订阅）
-https://<你的域名>/?format=3&source=jingjian
+```bash
+npm install -D wrangler
 ```
 
-### 完整版（full，默认）
+### 3. 创建 worker.js
 
-```jsx
-# 原始 JSON
-https://<你的域名>/?format=0&source=full
+将你的代码保存为：
 
-# 带代理前缀的 JSON
-https://<你的域名>/?format=1&source=full
+```bash
+/worker.js
+```
 
-# 原始 Base58 编码
-https://<你的域名>/?format=2&source=full
+### 4. 创建 wrangler.toml
 
-# 代理 Base58 编码（推荐用于订阅）
-https://<你的域名>/?format=3&source=full
+```toml
+name = "cf-proxy-service"
+main = "worker.js"
+compatibility_date = "2026-03-30"
+workers_dev = true
+
+[[kv_namespaces]]
+binding = "KV"
+id = "你的KV命名空间ID"
+preview_id = "你的KV预览命名空间ID"
+```
+
+### 5. 登录 Cloudflare
+
+```bash
+npx wrangler login
+```
+
+### 6. 创建 KV 命名空间
+
+```bash
+npx wrangler kv namespace create KV
+npx wrangler kv namespace create KV --preview
+```
+
+创建后，把返回的 id 填入 wrangler.toml。
+
+### 7. 本地开发
+
+```bash
+npx wrangler dev
+```
+
+默认会启动在：
+
+```text
+http://127.0.0.1:8787
+```
+
+### 8. 发布上线
+
+```bash
+npx wrangler deploy
 ```
 
 ---
 
-## 📌 注意事项
+## 方案二：Cloudflare Pages Functions
 
-- **Workers 免费额度**：每天 10 万次请求，适合轻量使用。超出后需升级付费套餐。
-- **代理替换逻辑**：如果 JSON 中 `api` 字段已包含 `?url=` 前缀，会先去掉旧前缀，再加上新前缀。
-- **Base58 输出**：适合直接作为订阅链接在支持该格式的客户端中使用。
-- **配置源更新**：配置源来自 GitHub，内容会定期更新。Worker 会缓存 7200 秒（2小时）。
-- **超时设置**：默认请求超时时间为 9 秒，超时后会返回错误信息。
-- **CORS 支持**：已启用完整的 CORS 支持，可直接在前端应用中调用。
+### 1. 项目结构
+
+```tree
+.
+├── functions
+│   └── [[path]].js
+├── public
+│   └── index.html
+├── wrangler.toml
+└── package.json
+```
+
+### 2. 文件路径
+
+把你的代码保存到：
+
+```bash
+/functions/[[path]].js
+```
+
+### 3. wrangler.toml
+
+```toml
+name = "cf-pages-proxy"
+compatibility_date = "2026-03-30"
+pages_build_output_dir = "public"
+
+[[kv_namespaces]]
+binding = "KV"
+id = "你的KV命名空间ID"
+preview_id = "你的KV预览命名空间ID"
+```
+
+### 4. 本地开发
+
+```bash
+npx wrangler pages dev public
+```
+
+### 5. 发布
+
+推送到 GitHub 后，在 Cloudflare Pages 中连接仓库即可自动部署。
 
 ---
 
-## 🔧 高级配置
+# package.json
 
-### 修改配置源地址
-
-在 `worker.js` 中找到 `JSON_SOURCES` 对象并修改：
-
-```jsx
-const JSON_SOURCES = {
-  'jin18': 'https://raw.githubusercontent.com/your-repo/jin18.json',
-  'jingjian': 'https://raw.githubusercontent.com/your-repo/jingjian.json',
-  'full': 'https://raw.githubusercontent.com/your-repo/full.json'
+```json
+{
+  "name": "cf-proxy-service",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4.8.0"
+  }
 }
 ```
 
-### 修改超时时间
+---
 
-找到以下代码并修改超时毫秒数：
+# 环境变量
 
-```jsx
-const timeoutId = setTimeout(() => controller.abort(), 9000) // 改为其他值
-```
+当前项目不依赖额外环境变量。
 
-### 添加访问日志
+仅需要绑定：
 
-可以在代码中添加日志记录：
-
-```jsx
-console.log(`Request from: ${request.headers.get('cf-connecting-ip')}`)
+```text
+KV
 ```
 
 ---
 
-## ❓ 常见问题
+# API 使用说明
 
-### Q: 如何查看我的 Worker 地址？
+## 1. 健康检查
 
-A: 部署后在 Cloudflare Dashboard 的 Workers 页面可以看到，格式通常为 [`https://worker-name.your-subdomain.workers.dev`](https://worker-name.your-subdomain.workers.dev)
+```http
+GET /health
+```
 
-### Q: 可以绑定自定义域名吗？
+示例：
 
-A: 可以！在 Worker 设置中点击「Triggers」→「Add Custom Domain」，添加你的域名即可。
+```bash
+curl https://your-domain.com/health
+```
 
-### Q: 为什么返回 502 错误？
+返回：
 
-A: 可能是目标 API 超时或无法访问，检查目标 URL 是否正确，或者尝试增加超时时间。
-
-### Q: Base58 编码后如何解码？
-
-A: 需要使用支持 Base58 解码的库或客户端，解码后即可得到原始 JSON 配置。
-
-### Q: 配置源多久更新一次？
-
-A: 根据 JSON 中的 `cache_time: 7200`（秒），建议客户端每 2 小时刷新一次配置。
+```text
+OK
+```
 
 ---
 
-## 📄 许可证
+## 2. 通用代理
 
-MIT License - 自由使用、修改和分发
+请求方式：
+
+```http
+GET /?url=https://example.com/api/data
+```
+
+示例：
+
+```bash
+curl "https://your-domain.com/?url=https://jsonplaceholder.typicode.com/posts/1"
+```
+
+POST 示例：
+
+```bash
+curl -X POST "https://your-domain.com/?url=https://httpbin.org/post" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"test"}'
+```
 
 ---
 
-## 🤝 贡献
+## 3. JSON 配置输出
 
-欢迎提交 Issue 和 Pull Request 改进此项目！
+### format 参数
+
+| 参数值          | 说明          |
+| ------------ | ----------- |
+| 0            | 原始 JSON     |
+| raw          | 原始 JSON     |
+| 1            | 添加代理前缀      |
+| proxy        | 添加代理前缀      |
+| 2            | Base58 编码   |
+| base58       | Base58 编码   |
+| 3            | 代理 + Base58 |
+| proxy-base58 | 代理 + Base58 |
+
+### source 参数
+
+| 参数值      | 说明      |
+| -------- | ------- |
+| jin18    | 精简版     |
+| jingjian | 精简版+成人  |
+| full     | 完整版（默认） |
 
 ---
 
-⭐ **如果这个项目对你有帮助，请给个 Star 支持一下！**
+# 配置示例
+
+## 原始 JSON
+
+```bash
+curl "https://your-domain.com/?format=0&source=full"
+```
+
+## 代理 JSON
+
+```bash
+curl "https://your-domain.com/?format=1&source=full"
+```
+
+## Base58
+
+```bash
+curl "https://your-domain.com/?format=2&source=full"
+```
+
+## 代理 + Base58
+
+```bash
+curl "https://your-domain.com/?format=3&source=full"
+```
+
+## 自定义前缀
+
+```bash
+curl "https://your-domain.com/?format=1&source=full&prefix=https://proxy.example.com/?url="
+```
+
+---
+
+# 缓存策略
+
+项目采用双层缓存：
+
+## Worker 内存缓存
+
+* 缓存时间：5 分钟
+* 同一个 Worker 实例共享
+* 响应速度最快
+
+## Cloudflare KV 缓存
+
+* 缓存时间：30 分钟
+* 跨 Worker 实例共享
+* 减少 GitHub Raw 请求次数
+
+缓存读取顺序：
+
+```text
+内存缓存 -> KV 缓存 -> 源站请求
+```
+
+---
+
+# 错误响应格式
+
+所有错误都会返回统一 JSON：
+
+```json
+{
+  "success": false,
+  "error": "错误信息",
+  "details": {},
+  "timestamp": "2026-03-30T12:00:00.000Z"
+}
+```
+
+---
+
+# 安全限制
+
+项目内置以下保护：
+
+* 禁止代理请求自身域名，防止死循环
+* 禁止非 http / https URL
+* 自动移除敏感响应头
+* 自动超时终止请求
+* 不透传 Set-Cookie
+
+---
+
+# 性能优化建议
+
+## 推荐优化
+
+1. 给 fetch 增加 cf cacheEverything 与 cacheTtl
+2. 增加 URL 白名单
+3. 增加请求频率限制
+4. 增加日志系统
+5. 增加监控告警
+6. 增加 gzip / brotli 压缩
+7. 增加多源容灾
+
+---
+
+# 后续可扩展功能
+
+* IP 黑名单
+* Token 鉴权
+* 请求次数统计
+* 管理后台
+* 动态配置源
+* Web UI 面板
+* 限流系统
+* 数据分析
+
+---
+
+# License
+
+MIT
